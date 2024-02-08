@@ -6,9 +6,12 @@
 #include <GLFW/glfw3.h>
 #include <pthread.h>
 
+const int MAX_FRAMES_IN_FLIGHT = 2;
+
 struct Renderer {
   // state
   int running;
+  int currentFrame;
 
   // ui
   struct Vertex *vertices;
@@ -49,10 +52,10 @@ struct Renderer {
 
   // command buffer
   VkCommandPool commandPool;
-  VkCommandBuffer commandBuffer;
+  VkCommandBuffer *commandBuffers;
 
   // sync objects
-  struct SyncObjects sync;
+  struct SyncObjects *syncObjects;
 
   // vertex buffer
   VkBuffer vertexBuffer;
@@ -62,14 +65,17 @@ struct Renderer {
 static void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
   VkResult result;
 
+  // get framebuffer sizes
+  glfwGetFramebufferSize(r->window, &r->width, &r->height);
+
   // reset
-  vkResetCommandBuffer(r->commandBuffer, 0);
+  vkResetCommandBuffer(r->commandBuffers[r->currentFrame], 0);
 
   // begin recording
   VkCommandBufferBeginInfo beginInfo = {0};
   beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
-  result = vkBeginCommandBuffer(r->commandBuffer, &beginInfo);
+  result = vkBeginCommandBuffer(r->commandBuffers[r->currentFrame], &beginInfo);
   if (result != VK_SUCCESS) {
     die("Failed to begin recording command buffer: %d\n", result);
   }
@@ -90,30 +96,31 @@ static void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
   renderPassInfo.clearValueCount = 1;
   renderPassInfo.pClearValues = &clearValue;
 
-  vkCmdBeginRenderPass(r->commandBuffer, &renderPassInfo,
+  vkCmdBeginRenderPass(r->commandBuffers[r->currentFrame], &renderPassInfo,
                        VK_SUBPASS_CONTENTS_INLINE);
 
   // bind pipeline
-  vkCmdBindPipeline(r->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    r->pipeline);
+  vkCmdBindPipeline(r->commandBuffers[r->currentFrame],
+                    VK_PIPELINE_BIND_POINT_GRAPHICS, r->pipeline);
 
   // push constants
   struct PushConstants pushConstants = {{r->width, r->height}};
-  vkCmdPushConstants(r->commandBuffer, r->pipelineLayout,
+  vkCmdPushConstants(r->commandBuffers[r->currentFrame], r->pipelineLayout,
                      VK_SHADER_STAGE_VERTEX_BIT, 0,
                      sizeof(struct PushConstants), &pushConstants);
 
   // draw the loaded vertices
   VkBuffer vertexBuffers[] = {r->vertexBuffer};
   VkDeviceSize offsets[] = {0};
-  vkCmdBindVertexBuffers(r->commandBuffer, 0, 1, vertexBuffers, offsets);
-  vkCmdDraw(r->commandBuffer, r->vertexCount, 1, 0, 0);
+  vkCmdBindVertexBuffers(r->commandBuffers[r->currentFrame], 0, 1,
+                         vertexBuffers, offsets);
+  vkCmdDraw(r->commandBuffers[r->currentFrame], r->vertexCount, 1, 0, 0);
 
   // end render pass
-  vkCmdEndRenderPass(r->commandBuffer);
+  vkCmdEndRenderPass(r->commandBuffers[r->currentFrame]);
 
   // end recording
-  result = vkEndCommandBuffer(r->commandBuffer);
+  result = vkEndCommandBuffer(r->commandBuffers[r->currentFrame]);
   if (result != VK_SUCCESS) {
     die("Failed to end recording command buffer: %d\n", result);
   }
@@ -121,9 +128,9 @@ static void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
 
 static void framebufferResizeCallback(GLFWwindow *window, int width,
                                       int height) {
+  (void)width;
+  (void)height;
   Renderer r = glfwGetWindowUserPointer(window);
-  r->width = width;
-  r->height = height;
   r->resized = 1;
 }
 
@@ -159,64 +166,74 @@ static void cleanupSwapchain(Renderer r) {
   vkDestroySwapchainKHR(r->device, r->swapchain, NULL);
 }
 
+static void renderFrame(Renderer r) {
+  // wait for previous frame to finish
+  vkWaitForFences(r->device, 1, &r->syncObjects[r->currentFrame].inFlight,
+                  VK_TRUE, UINT64_MAX);
+
+  // get next image to render to
+  uint32_t imageIndex;
+  VkResult result =
+      vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
+                            r->syncObjects[r->currentFrame].imageAvailable,
+                            VK_NULL_HANDLE, &imageIndex);
+  if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    recreateSwapchain(r);
+    return;
+  } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+    die("failed to acquire swap chain image!: %d\n", result);
+  }
+
+  // record command buffer
+  vkResetFences(r->device, 1, &r->syncObjects[r->currentFrame].inFlight);
+  recordCommandBuffer(r, imageIndex);
+
+  // submit command buffer
+  VkSubmitInfo submitInfo = {0};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+  VkSemaphore waitSemaphores[] = {
+      r->syncObjects[r->currentFrame].imageAvailable};
+  VkPipelineStageFlags waitStages[] = {
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+  submitInfo.waitSemaphoreCount = 1;
+  submitInfo.pWaitSemaphores = waitSemaphores;
+  submitInfo.pWaitDstStageMask = waitStages;
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = &r->commandBuffers[r->currentFrame];
+
+  VkSemaphore signalSemaphores[] = {
+      r->syncObjects[r->currentFrame].renderFinished};
+  submitInfo.signalSemaphoreCount = 1;
+  submitInfo.pSignalSemaphores = signalSemaphores;
+
+  result = vkQueueSubmit(r->queue, 1, &submitInfo,
+                         r->syncObjects[r->currentFrame].inFlight);
+  if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    recreateSwapchain(r);
+  } else if (result != VK_SUCCESS) {
+    die("Failed to submit draw command buffer: %d\n", result);
+  }
+
+  // present image
+  VkPresentInfoKHR presentInfo = {0};
+  presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+  presentInfo.waitSemaphoreCount = 1;
+  presentInfo.pWaitSemaphores = signalSemaphores;
+
+  VkSwapchainKHR swapChains[] = {r->swapchain};
+  presentInfo.swapchainCount = 1;
+  presentInfo.pSwapchains = swapChains;
+  presentInfo.pImageIndices = &imageIndex;
+  presentInfo.pResults = NULL;
+
+  vkQueuePresentKHR(r->queue, &presentInfo);
+  r->currentFrame = (r->currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
 static void render(Renderer r) {
   while (r->running) {
-    // wait for previous frame to finish
-    vkWaitForFences(r->device, 1, &r->sync.inFlight, VK_TRUE, UINT64_MAX);
-
-    // get next image to render to
-    uint32_t imageIndex;
-    VkResult result = vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
-                                            r->sync.imageAvailable,
-                                            VK_NULL_HANDLE, &imageIndex);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-      recreateSwapchain(r);
-      continue;
-    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-      die("failed to acquire swap chain image!: %d\n", result);
-    }
-
-    // record command buffer
-    vkResetFences(r->device, 1, &r->sync.inFlight);
-    recordCommandBuffer(r, imageIndex);
-
-    // submit command buffer
-    VkSubmitInfo submitInfo = {0};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-    VkSemaphore waitSemaphores[] = {r->sync.imageAvailable};
-    VkPipelineStageFlags waitStages[] = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &r->commandBuffer;
-
-    VkSemaphore signalSemaphores[] = {r->sync.renderFinished};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
-
-    result = vkQueueSubmit(r->queue, 1, &submitInfo, r->sync.inFlight);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-      recreateSwapchain(r);
-    } else if (result != VK_SUCCESS) {
-      die("Failed to submit draw command buffer: %d\n", result);
-    }
-
-    // present image
-    VkPresentInfoKHR presentInfo = {0};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = signalSemaphores;
-
-    VkSwapchainKHR swapChains[] = {r->swapchain};
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = swapChains;
-    presentInfo.pImageIndices = &imageIndex;
-    presentInfo.pResults = NULL;
-
-    vkQueuePresentKHR(r->queue, &presentInfo);
+    renderFrame(r);
   }
 }
 
@@ -224,6 +241,7 @@ Renderer makeRenderer(char *title, int width, int height,
                       struct Vertex *vertices, int vertexCount) {
   Renderer r = malloc(sizeof(struct Renderer));
   r->running = 1;
+  r->currentFrame = 0;
   r->vertices = vertices;
   r->vertexCount = vertexCount;
   r->title = title;
@@ -286,10 +304,16 @@ Renderer makeRenderer(char *title, int width, int height,
 
   // command buffer
   r->commandPool = makeVkCommandPool(r->device, r->queueFamilyIndex);
-  r->commandBuffer = makeVkCommandBuffer(r->device, r->commandPool);
+  r->commandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
+  for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    r->commandBuffers[i] = makeVkCommandBuffer(r->device, r->commandPool);
+  }
 
   // sync objects
-  r->sync = makeVkSyncObjects(r->device);
+  r->syncObjects = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(struct SyncObjects));
+  for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    r->syncObjects[i] = makeVkSyncObjects(r->device);
+  }
 
   // vertex buffer
   struct VertexBufferAndMemory vbam =
@@ -302,6 +326,7 @@ Renderer makeRenderer(char *title, int width, int height,
 }
 
 void mainLoop(Renderer r) {
+#ifndef SEPARATE_RENDER_THREAD
   pthread_t renderThread;
 
   pthread_create(&renderThread, NULL, (void *(*)(void *))render, r);
@@ -311,6 +336,16 @@ void mainLoop(Renderer r) {
 
   r->running = 0;
   pthread_join(renderThread, NULL);
+#else
+  (void)render;
+
+  while (!glfwWindowShouldClose(r->window)) {
+    glfwPollEvents();
+    renderFrame(r);
+  }
+
+  r->running = 0;
+#endif
 }
 
 void freeRenderer(Renderer r) {
@@ -322,11 +357,14 @@ void freeRenderer(Renderer r) {
   vkFreeMemory(r->device, r->vertexMemory, NULL);
 
   // sync objects
-  vkDestroySemaphore(r->device, r->sync.imageAvailable, NULL);
-  vkDestroySemaphore(r->device, r->sync.renderFinished, NULL);
-  vkDestroyFence(r->device, r->sync.inFlight, NULL);
+  for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    vkDestroySemaphore(r->device, r->syncObjects[i].imageAvailable, NULL);
+    vkDestroySemaphore(r->device, r->syncObjects[i].renderFinished, NULL);
+    vkDestroyFence(r->device, r->syncObjects[i].inFlight, NULL);
+  }
 
-  // command buffer
+  // command buffers
+  free(r->commandBuffers);
   vkDestroyCommandPool(r->device, r->commandPool, NULL);
 
   // graphics pipeline

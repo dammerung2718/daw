@@ -13,7 +13,8 @@ static void pushVertex(struct VertexBuilder *b, struct Vertex v) {
   b->vertices[b->vertexCount++] = v;
 }
 
-static void rect(struct VertexBuilder *b, int x, int y, int width, int height) {
+static void rectangle(struct VertexBuilder *b, int x, int y, int width,
+                      int height) {
   struct Vertex topLeft = {{x, y}};
   struct Vertex topRight = {{x + width, y}};
   struct Vertex bottomRight = {{x + width, y + height}};
@@ -27,9 +28,15 @@ static void rect(struct VertexBuilder *b, int x, int y, int width, int height) {
   pushVertex(b, topLeft);
 }
 
-static void ui(struct VertexBuilder *b) {
-  rect(b, 0, 0, 640, 480);
-  return;
+static void triangle(struct VertexBuilder *b, int x, int y, int width,
+                     int height) {
+  struct Vertex top = {{x, y}};
+  struct Vertex left = {{x, y + height}};
+  struct Vertex right = {{x + width, y + height}};
+
+  pushVertex(b, top);
+  pushVertex(b, right);
+  pushVertex(b, left);
 }
 
 int main(void) {
@@ -39,7 +46,8 @@ int main(void) {
 
   // ui
   struct VertexBuilder b = {0};
-  ui(&b);
+  rectangle(&b, 100, 100, 100, 100);
+  triangle(&b, 300, 100, 100, 100);
 
   Renderer r = makeRenderer("DAW", 640, 480, b.vertices, b.vertexCount);
   mainLoop(r);
