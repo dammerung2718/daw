@@ -46,6 +46,56 @@ struct Renderer {
   struct SyncObjects sync;
 };
 
+void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
+  VkResult result;
+
+  // reset
+  vkResetCommandBuffer(r->commandBuffer, 0);
+
+  // begin recording
+  VkCommandBufferBeginInfo beginInfo = {0};
+  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+  result = vkBeginCommandBuffer(r->commandBuffer, &beginInfo);
+  if (result != VK_SUCCESS) {
+    die("Failed to begin recording command buffer: %d\n", result);
+  }
+
+  // begin render pass
+  VkRenderPassBeginInfo renderPassInfo = {0};
+  renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+  renderPassInfo.renderPass = r->renderPass;
+  renderPassInfo.framebuffer = r->framebuffers[imageIndex];
+  renderPassInfo.renderArea.offset.x = 0;
+  renderPassInfo.renderArea.offset.y = 0;
+  renderPassInfo.renderArea.extent.width =
+      r->swapchainSettings.selectedExtent.width;
+  renderPassInfo.renderArea.extent.height =
+      r->swapchainSettings.selectedExtent.height;
+
+  VkClearValue clearValue = {{{1.0f, 1.0f, 1.0f, 1.0f}}};
+  renderPassInfo.clearValueCount = 1;
+  renderPassInfo.pClearValues = &clearValue;
+
+  vkCmdBeginRenderPass(r->commandBuffer, &renderPassInfo,
+                       VK_SUBPASS_CONTENTS_INLINE);
+
+  // bind pipeline
+  vkCmdBindPipeline(r->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    r->pipeline);
+
+  // TODO: draw the loaded vertices
+
+  // end render pass
+  vkCmdEndRenderPass(r->commandBuffer);
+
+  // end recording
+  result = vkEndCommandBuffer(r->commandBuffer);
+  if (result != VK_SUCCESS) {
+    die("Failed to end recording command buffer: %d\n", result);
+  }
+}
+
 Renderer makeRenderer(char *title, int width, int height) {
   Renderer r = malloc(sizeof(struct Renderer));
   r->title = title;
@@ -126,8 +176,8 @@ void mainLoop(Renderer r) {
     vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
                           r->sync.imageAvailable, VK_NULL_HANDLE, &imageIndex);
 
-    // TODO: record command buffer
-    vkResetCommandBuffer(r->commandBuffer, 0);
+    // record command buffer
+    recordCommandBuffer(r, imageIndex);
 
     // submit command buffer
     VkSubmitInfo submitInfo = {0};
@@ -168,6 +218,8 @@ void mainLoop(Renderer r) {
 }
 
 void freeRenderer(Renderer r) {
+  vkDeviceWaitIdle(r->device);
+
   // sync objects
   vkDestroySemaphore(r->device, r->sync.imageAvailable, NULL);
   vkDestroySemaphore(r->device, r->sync.renderFinished, NULL);

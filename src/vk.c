@@ -1,6 +1,7 @@
 #include "vk.h"
 
 #include "die.h"
+#include "vertex.h"
 #include "vulkan/vulkan_core.h"
 #include <assert.h>
 #include <math.h>
@@ -24,6 +25,11 @@ const char *deviceExtensions[DEVICE_EXTENSIONS] = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
 // PRIVATE FUNCTIONS
+
+static float clamp(float d, float min, float max) {
+  const float t = d < min ? min : d;
+  return t > max ? max : t;
+}
 
 static int checkValidationLayerSupport(void) {
   // get available layers
@@ -237,11 +243,10 @@ struct SwapchainSettings makeSwapchainSettings(VkPhysicalDevice physicalDevice,
 
   VkExtent2D selectedExtent = capabilities.currentExtent;
   if (capabilities.currentExtent.width == UINT32_MAX) {
-    selectedExtent.width = fmax(capabilities.minImageExtent.width,
-                                fmin(capabilities.maxImageExtent.width, width));
-    selectedExtent.height =
-        fmax(capabilities.minImageExtent.height,
-             fmin(capabilities.maxImageExtent.height, height));
+    selectedExtent.width = clamp(width, capabilities.minImageExtent.width,
+                                 capabilities.maxImageExtent.width);
+    selectedExtent.width = clamp(height, capabilities.minImageExtent.height,
+                                 capabilities.maxImageExtent.height);
   }
 
   // decide image count
@@ -437,13 +442,19 @@ VkPipeline makeVkPipeline(VkDevice device, struct SwapchainSettings settings,
   dynamicState.pDynamicStates = dynamicStates;
 
   // vertex input state
+  VkVertexInputBindingDescription bindingDescription =
+      getVertexBindingDescription();
+  VkVertexInputAttributeDescription *attributeDescriptions =
+      getVertexAttributeDescriptions();
+
   VkPipelineVertexInputStateCreateInfo vertexInputInfo = {0};
   vertexInputInfo.sType =
       VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  vertexInputInfo.vertexBindingDescriptionCount = 0;
-  vertexInputInfo.pVertexBindingDescriptions = NULL; // Optional
-  vertexInputInfo.vertexAttributeDescriptionCount = 0;
-  vertexInputInfo.pVertexAttributeDescriptions = NULL; // Optional
+  vertexInputInfo.vertexBindingDescriptionCount = 1;
+  vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+  vertexInputInfo.vertexAttributeDescriptionCount =
+      getVertexAttributeDescriptionCount();
+  vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
 
   // input assembly stage
   VkPipelineInputAssemblyStateCreateInfo inputAssembly = {0};
@@ -641,6 +652,7 @@ struct SyncObjects makeVkSyncObjects(VkDevice device) {
 
   VkFenceCreateInfo fenceInfo = {0};
   fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
   // imageAvailable
   result =

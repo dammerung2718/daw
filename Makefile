@@ -14,7 +14,7 @@ run: bin/vert.spv bin/frag.spv bin/daw
 clean:
 	rm -rf bin
 
-bin/daw: src/main.c src/renderer.c src/vk.c
+bin/daw: src/main.c src/renderer.c src/vk.c src/vertex.c
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ $^
 
