@@ -19,7 +19,9 @@ bin/daw: src/main.c src/renderer.c src/vk.c src/vertex.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 bin/vert.spv: assets/shader.vert
+	mkdir -p bin
 	$(VULKAN_SDK_PATH)/bin/glslc -o $@ $^
 
 bin/frag.spv: assets/shader.frag
+	mkdir -p bin
 	$(VULKAN_SDK_PATH)/bin/glslc -o $@ $^

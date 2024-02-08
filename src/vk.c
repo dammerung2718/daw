@@ -77,6 +77,22 @@ static const char **instanceExtensions(uint32_t *count) {
   return extensions;
 }
 
+static uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
+                               uint32_t typeFilter,
+                               VkMemoryPropertyFlags properties) {
+  VkPhysicalDeviceMemoryProperties memProperties;
+  vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+  for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+    if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags &
+                                    properties) == properties) {
+      return i;
+    }
+  }
+
+  die("failed to find suitable memory type!");
+}
+
 // PUBLIC FUNCTIONS
 
 VkInstance makeVkInstance(char *appName) {
@@ -411,12 +427,17 @@ VkRenderPass makeVkRenderPass(VkDevice device,
 }
 
 VkPipelineLayout makeVkPipelineLayout(VkDevice device) {
+  VkPushConstantRange pushConstants;
+  pushConstants.offset = 0;
+  pushConstants.size = sizeof(struct PushConstants);
+  pushConstants.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
   VkPipelineLayoutCreateInfo pipelineLayoutInfo = {0};
   pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  pipelineLayoutInfo.setLayoutCount = 0;         // Optional
-  pipelineLayoutInfo.pSetLayouts = NULL;         // Optional
-  pipelineLayoutInfo.pushConstantRangeCount = 0; // Optional
-  pipelineLayoutInfo.pPushConstantRanges = NULL; // Optional
+  pipelineLayoutInfo.setLayoutCount = 0; // Optional
+  pipelineLayoutInfo.pSetLayouts = NULL; // Optional
+  pipelineLayoutInfo.pushConstantRangeCount = 1;
+  pipelineLayoutInfo.pPushConstantRanges = &pushConstants;
 
   VkPipelineLayout pipelineLayout;
   VkResult result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, NULL,
@@ -676,4 +697,53 @@ struct SyncObjects makeVkSyncObjects(VkDevice device) {
 
   // done
   return sync;
+}
+
+struct VertexBufferAndMemory makeVkVertexBuffer(VkPhysicalDevice physicalDevice,
+                                                VkDevice device,
+                                                struct Vertex *vertices,
+                                                int vertexCount) {
+  struct VertexBufferAndMemory vbam = {0};
+  VkResult result;
+
+  // create buffer
+  VkBufferCreateInfo bufferInfo = {0};
+  bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferInfo.size = sizeof(vertices[0]) * vertexCount;
+  bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+  bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+  result = vkCreateBuffer(device, &bufferInfo, NULL, &vbam.buffer);
+  if (result != VK_SUCCESS) {
+    die("failed to create vertex buffer!: %d\n", result);
+  }
+
+  // alloc memory
+  VkMemoryRequirements memRequirements;
+  vkGetBufferMemoryRequirements(device, vbam.buffer, &memRequirements);
+
+  VkMemoryAllocateInfo allocInfo = {0};
+  allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  allocInfo.allocationSize = memRequirements.size;
+  allocInfo.memoryTypeIndex =
+      findMemoryType(physicalDevice, memRequirements.memoryTypeBits,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+  result = vkAllocateMemory(device, &allocInfo, NULL, &vbam.memory);
+  if (result != VK_SUCCESS) {
+    die("failed to allocate vertex buffer memory!: %d\n", result);
+  }
+
+  // bind memory to buffer
+  vkBindBufferMemory(device, vbam.buffer, vbam.memory, 0);
+
+  // copy data
+  void *data;
+  vkMapMemory(device, vbam.memory, 0, bufferInfo.size, 0, &data);
+  memcpy(data, vertices, (size_t)bufferInfo.size);
+  vkUnmapMemory(device, vbam.memory);
+
+  // done
+  return vbam;
 }

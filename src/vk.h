@@ -4,6 +4,8 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include "vertex.h"
+
 struct SwapchainSettings {
   uint32_t imageCount;
   VkSurfaceTransformFlagBitsKHR currentTransform;
@@ -16,6 +18,15 @@ struct SyncObjects {
   VkSemaphore imageAvailable;
   VkSemaphore renderFinished;
   VkFence inFlight;
+};
+
+struct VertexBufferAndMemory {
+  VkBuffer buffer;
+  VkDeviceMemory memory;
+};
+
+struct PushConstants {
+  struct Vec2 resolution;
 };
 
 VkInstance makeVkInstance(char *appName);
@@ -54,5 +65,10 @@ VkCommandPool makeVkCommandPool(VkDevice device, int queueFamilyIndex);
 VkCommandBuffer makeVkCommandBuffer(VkDevice device, VkCommandPool commandPool);
 
 struct SyncObjects makeVkSyncObjects(VkDevice device);
+
+struct VertexBufferAndMemory makeVkVertexBuffer(VkPhysicalDevice physicalDevice,
+                                                VkDevice device,
+                                                struct Vertex *vertices,
+                                                int vertexCount);
 
 #endif

@@ -4,8 +4,16 @@
 #include "vk.h"
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <pthread.h>
 
 struct Renderer {
+  // state
+  int running;
+
+  // ui
+  struct Vertex *vertices;
+  int vertexCount;
+
   // window
   char *title;
   int width, height;
@@ -45,6 +53,10 @@ struct Renderer {
 
   // sync objects
   struct SyncObjects sync;
+
+  // vertex buffer
+  VkBuffer vertexBuffer;
+  VkDeviceMemory vertexMemory;
 };
 
 static void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
@@ -85,7 +97,17 @@ static void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
   vkCmdBindPipeline(r->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     r->pipeline);
 
-  // TODO: draw the loaded vertices
+  // push constants
+  struct PushConstants pushConstants = {{r->width, r->height}};
+  vkCmdPushConstants(r->commandBuffer, r->pipelineLayout,
+                     VK_SHADER_STAGE_VERTEX_BIT, 0,
+                     sizeof(struct PushConstants), &pushConstants);
+
+  // draw the loaded vertices
+  VkBuffer vertexBuffers[] = {r->vertexBuffer};
+  VkDeviceSize offsets[] = {0};
+  vkCmdBindVertexBuffers(r->commandBuffer, 0, 1, vertexBuffers, offsets);
+  vkCmdDraw(r->commandBuffer, r->vertexCount, 1, 0, 0);
 
   // end render pass
   vkCmdEndRenderPass(r->commandBuffer);
@@ -137,8 +159,73 @@ static void cleanupSwapchain(Renderer r) {
   vkDestroySwapchainKHR(r->device, r->swapchain, NULL);
 }
 
-Renderer makeRenderer(char *title, int width, int height) {
+static void render(Renderer r) {
+  while (r->running) {
+    // wait for previous frame to finish
+    vkWaitForFences(r->device, 1, &r->sync.inFlight, VK_TRUE, UINT64_MAX);
+
+    // get next image to render to
+    uint32_t imageIndex;
+    VkResult result = vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
+                                            r->sync.imageAvailable,
+                                            VK_NULL_HANDLE, &imageIndex);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+      recreateSwapchain(r);
+      continue;
+    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+      die("failed to acquire swap chain image!: %d\n", result);
+    }
+
+    // record command buffer
+    vkResetFences(r->device, 1, &r->sync.inFlight);
+    recordCommandBuffer(r, imageIndex);
+
+    // submit command buffer
+    VkSubmitInfo submitInfo = {0};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    VkSemaphore waitSemaphores[] = {r->sync.imageAvailable};
+    VkPipelineStageFlags waitStages[] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &r->commandBuffer;
+
+    VkSemaphore signalSemaphores[] = {r->sync.renderFinished};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    result = vkQueueSubmit(r->queue, 1, &submitInfo, r->sync.inFlight);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+      recreateSwapchain(r);
+    } else if (result != VK_SUCCESS) {
+      die("Failed to submit draw command buffer: %d\n", result);
+    }
+
+    // present image
+    VkPresentInfoKHR presentInfo = {0};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = signalSemaphores;
+
+    VkSwapchainKHR swapChains[] = {r->swapchain};
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = swapChains;
+    presentInfo.pImageIndices = &imageIndex;
+    presentInfo.pResults = NULL;
+
+    vkQueuePresentKHR(r->queue, &presentInfo);
+  }
+}
+
+Renderer makeRenderer(char *title, int width, int height,
+                      struct Vertex *vertices, int vertexCount) {
   Renderer r = malloc(sizeof(struct Renderer));
+  r->running = 1;
+  r->vertices = vertices;
+  r->vertexCount = vertexCount;
   r->title = title;
   r->width = width;
   r->height = height;
@@ -203,76 +290,35 @@ Renderer makeRenderer(char *title, int width, int height) {
   // sync objects
   r->sync = makeVkSyncObjects(r->device);
 
+  // vertex buffer
+  struct VertexBufferAndMemory vbam =
+      makeVkVertexBuffer(r->physicalDevice, r->device, vertices, vertexCount);
+  r->vertexBuffer = vbam.buffer;
+  r->vertexMemory = vbam.memory;
+
   // return
   return r;
 }
 
 void mainLoop(Renderer r) {
+  pthread_t renderThread;
+
+  pthread_create(&renderThread, NULL, (void *(*)(void *))render, r);
   while (!glfwWindowShouldClose(r->window)) {
     glfwPollEvents(); // TODO: event handling
-
-    // wait for previous frame to finish
-    vkWaitForFences(r->device, 1, &r->sync.inFlight, VK_TRUE, UINT64_MAX);
-
-    // get next image to render to
-    uint32_t imageIndex;
-    VkResult result = vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
-                                            r->sync.imageAvailable,
-                                            VK_NULL_HANDLE, &imageIndex);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-      recreateSwapchain(r);
-      continue;
-    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-      die("failed to acquire swap chain image!: %d\n", result);
-    }
-
-    // record command buffer
-    vkResetFences(r->device, 1, &r->sync.inFlight);
-    recordCommandBuffer(r, imageIndex);
-
-    // submit command buffer
-    VkSubmitInfo submitInfo = {0};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-    VkSemaphore waitSemaphores[] = {r->sync.imageAvailable};
-    VkPipelineStageFlags waitStages[] = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &r->commandBuffer;
-
-    VkSemaphore signalSemaphores[] = {r->sync.renderFinished};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
-
-    result = vkQueueSubmit(r->queue, 1, &submitInfo, r->sync.inFlight);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-      recreateSwapchain(r);
-    } else if (result != VK_SUCCESS) {
-      die("Failed to submit draw command buffer: %d\n", result);
-    }
-
-    // present image
-    VkPresentInfoKHR presentInfo = {0};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = signalSemaphores;
-
-    VkSwapchainKHR swapChains[] = {r->swapchain};
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = swapChains;
-    presentInfo.pImageIndices = &imageIndex;
-    presentInfo.pResults = NULL;
-
-    vkQueuePresentKHR(r->queue, &presentInfo);
   }
+
+  r->running = 0;
+  pthread_join(renderThread, NULL);
 }
 
 void freeRenderer(Renderer r) {
   vkDeviceWaitIdle(r->device);
   cleanupSwapchain(r);
+
+  // vertexBuffer
+  vkDestroyBuffer(r->device, r->vertexBuffer, NULL);
+  vkFreeMemory(r->device, r->vertexMemory, NULL);
 
   // sync objects
   vkDestroySemaphore(r->device, r->sync.imageAvailable, NULL);
