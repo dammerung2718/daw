@@ -253,6 +253,7 @@ Renderer makeRenderer(char *title, int width, int height,
   // resize callback
   glfwSetWindowUserPointer(r->window, r);
   glfwSetFramebufferSizeCallback(r->window, framebufferResizeCallback);
+  glfwGetFramebufferSize(r->window, &r->width, &r->height);
 
   // vulkan
   r->instance = makeVkInstance(r->title);

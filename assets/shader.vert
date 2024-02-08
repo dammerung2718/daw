@@ -7,6 +7,6 @@ layout(push_constant) uniform constants {
 } PushConstants;
 
 void main() {
-  vec2 uv = pos / PushConstants.resolution - 1;
+  vec2 uv = pos / PushConstants.resolution * 4 - 1;
   gl_Position = vec4(uv, 0.0, 1.0);
 }

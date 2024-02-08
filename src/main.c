@@ -28,7 +28,7 @@ static void rect(struct VertexBuilder *b, int x, int y, int width, int height) {
 }
 
 static void ui(struct VertexBuilder *b) {
-  rect(b, 100, 100, 200, 200);
+  rect(b, 0, 0, 640, 480);
   return;
 }
 
