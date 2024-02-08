@@ -28,9 +28,22 @@ struct Renderer {
   // swapchain image views
   VkImageView *imageViews;
 
-  // shaders
+  // graphics pipeline
   VkShaderModule vertShader;
   VkShaderModule fragShader;
+  VkRenderPass renderPass;
+  VkPipelineLayout pipelineLayout;
+  VkPipeline pipeline;
+
+  // framebuffers
+  VkFramebuffer *framebuffers;
+
+  // command buffer
+  VkCommandPool commandPool;
+  VkCommandBuffer commandBuffer;
+
+  // sync objects
+  struct SyncObjects sync;
 };
 
 Renderer makeRenderer(char *title, int width, int height) {
@@ -77,23 +90,101 @@ Renderer makeRenderer(char *title, int width, int height) {
   r->imageViews =
       makeVkImageViews(r->device, r->swapchainSettings, r->swapchainImages);
 
-  // shaders
+  // graphics pipeline
   r->vertShader = makeVkShaderModule(r->device, "bin/vert.spv");
   r->fragShader = makeVkShaderModule(r->device, "bin/frag.spv");
+  r->renderPass = makeVkRenderPass(r->device, r->swapchainSettings);
+  r->pipelineLayout = makeVkPipelineLayout(r->device);
+  r->pipeline = makeVkPipeline(r->device, r->swapchainSettings, r->vertShader,
+                               r->fragShader, r->renderPass, r->pipelineLayout);
+
+  // framebuffers
+  r->framebuffers = makeVkFramebuffers(r->device, r->swapchainSettings,
+                                       r->imageViews, r->renderPass);
+
+  // command buffer
+  r->commandPool = makeVkCommandPool(r->device, r->queueFamilyIndex);
+  r->commandBuffer = makeVkCommandBuffer(r->device, r->commandPool);
+
+  // sync objects
+  r->sync = makeVkSyncObjects(r->device);
 
   // return
   return r;
 }
 
 void mainLoop(Renderer r) {
-  // main loop
   while (!glfwWindowShouldClose(r->window)) {
     glfwPollEvents(); // TODO: event handling
+
+    // wait for previous frame to finish
+    vkWaitForFences(r->device, 1, &r->sync.inFlight, VK_TRUE, UINT64_MAX);
+    vkResetFences(r->device, 1, &r->sync.inFlight);
+
+    // get next image to render to
+    uint32_t imageIndex;
+    vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
+                          r->sync.imageAvailable, VK_NULL_HANDLE, &imageIndex);
+
+    // TODO: record command buffer
+    vkResetCommandBuffer(r->commandBuffer, 0);
+
+    // submit command buffer
+    VkSubmitInfo submitInfo = {0};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    VkSemaphore waitSemaphores[] = {r->sync.imageAvailable};
+    VkPipelineStageFlags waitStages[] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &r->commandBuffer;
+
+    VkSemaphore signalSemaphores[] = {r->sync.renderFinished};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    VkResult result = vkQueueSubmit(r->queue, 1, &submitInfo, r->sync.inFlight);
+    if (result != VK_SUCCESS) {
+      die("Failed to submit draw command buffer: %d\n", result);
+    }
+
+    // present image
+    VkPresentInfoKHR presentInfo = {0};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = signalSemaphores;
+
+    VkSwapchainKHR swapChains[] = {r->swapchain};
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = swapChains;
+    presentInfo.pImageIndices = &imageIndex;
+    presentInfo.pResults = NULL;
+
+    vkQueuePresentKHR(r->queue, &presentInfo);
   }
 }
 
 void freeRenderer(Renderer r) {
-  // shaders
+  // sync objects
+  vkDestroySemaphore(r->device, r->sync.imageAvailable, NULL);
+  vkDestroySemaphore(r->device, r->sync.renderFinished, NULL);
+  vkDestroyFence(r->device, r->sync.inFlight, NULL);
+
+  // command buffer
+  vkDestroyCommandPool(r->device, r->commandPool, NULL);
+
+  // framebuffers
+  for (uint32_t i = 0; i < r->swapchainSettings.imageCount; i++) {
+    vkDestroyFramebuffer(r->device, r->framebuffers[i], NULL);
+  }
+
+  // graphics pipeline
+  vkDestroyPipeline(r->device, r->pipeline, NULL);
+  vkDestroyPipelineLayout(r->device, r->pipelineLayout, NULL);
+  vkDestroyRenderPass(r->device, r->renderPass, NULL);
   vkDestroyShaderModule(r->device, r->fragShader, NULL);
   vkDestroyShaderModule(r->device, r->vertShader, NULL);
 

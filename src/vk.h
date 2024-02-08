@@ -12,6 +12,12 @@ struct SwapchainSettings {
   VkExtent2D selectedExtent;
 };
 
+struct SyncObjects {
+  VkSemaphore imageAvailable;
+  VkSemaphore renderFinished;
+  VkFence inFlight;
+};
+
 VkInstance makeVkInstance(char *appName);
 VkSurfaceKHR makeVkSurface(VkInstance instance, GLFWwindow *window);
 VkPhysicalDevice pickVkPhysicalDevice(VkInstance instance);
@@ -32,5 +38,21 @@ VkImageView *makeVkImageViews(VkDevice device,
                               VkImage *images);
 
 VkShaderModule makeVkShaderModule(VkDevice device, char *path);
+VkRenderPass makeVkRenderPass(VkDevice device,
+                              struct SwapchainSettings settings);
+VkPipelineLayout makeVkPipelineLayout(VkDevice device);
+VkPipeline makeVkPipeline(VkDevice device, struct SwapchainSettings settings,
+                          VkShaderModule vert, VkShaderModule frag,
+                          VkRenderPass renderPass,
+                          VkPipelineLayout pipelineLayout);
+
+VkFramebuffer *makeVkFramebuffers(VkDevice device,
+                                  struct SwapchainSettings settings,
+                                  VkImageView *imageViews,
+                                  VkRenderPass renderPass);
+VkCommandPool makeVkCommandPool(VkDevice device, int queueFamilyIndex);
+VkCommandBuffer makeVkCommandBuffer(VkDevice device, VkCommandPool commandPool);
+
+struct SyncObjects makeVkSyncObjects(VkDevice device);
 
 #endif
