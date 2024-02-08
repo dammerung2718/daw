@@ -1,6 +1,6 @@
 #include "vertex.h"
 
-#include <stdlib.h>
+#define ATTRIBUTE_COUNT 1
 
 VkVertexInputBindingDescription getVertexBindingDescription(void) {
   VkVertexInputBindingDescription bindingDescription = {0};
@@ -10,12 +10,11 @@ VkVertexInputBindingDescription getVertexBindingDescription(void) {
   return bindingDescription;
 }
 
-uint32_t getVertexAttributeDescriptionCount(void) { return 1; }
+uint32_t getVertexAttributeDescriptionCount(void) { return ATTRIBUTE_COUNT; }
 
 VkVertexInputAttributeDescription *getVertexAttributeDescriptions(void) {
-  VkVertexInputAttributeDescription *attributeDescriptions =
-      malloc(sizeof(VkVertexInputAttributeDescription) *
-             getVertexAttributeDescriptionCount());
+  static VkVertexInputAttributeDescription
+      attributeDescriptions[ATTRIBUTE_COUNT];
 
   attributeDescriptions[0].binding = 0;
   attributeDescriptions[0].location = 0;

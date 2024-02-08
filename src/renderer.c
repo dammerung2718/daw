@@ -10,6 +10,7 @@ struct Renderer {
   char *title;
   int width, height;
   GLFWwindow *window;
+  int resized;
 
   // vulkan
   VkInstance instance;
@@ -46,7 +47,7 @@ struct Renderer {
   struct SyncObjects sync;
 };
 
-void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
+static void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
   VkResult result;
 
   // reset
@@ -96,11 +97,52 @@ void recordCommandBuffer(Renderer r, uint32_t imageIndex) {
   }
 }
 
+static void framebufferResizeCallback(GLFWwindow *window, int width,
+                                      int height) {
+  Renderer r = glfwGetWindowUserPointer(window);
+  r->width = width;
+  r->height = height;
+  r->resized = 1;
+}
+
+static void recreateSwapchain(Renderer r) {
+  glfwGetFramebufferSize(r->window, &r->width, &r->height);
+  while (r->width == 0 || r->height == 0) {
+    glfwGetFramebufferSize(r->window, &r->width, &r->height);
+    glfwWaitEvents();
+  }
+
+  vkDeviceWaitIdle(r->device);
+
+  r->swapchainSettings =
+      makeSwapchainSettings(r->physicalDevice, r->surface, r->width, r->height);
+  r->swapchain = makeVkSwapchain(r->swapchainSettings, r->device, r->surface);
+  r->imageViews =
+      makeVkImageViews(r->device, r->swapchainSettings, r->swapchainImages);
+  r->framebuffers = makeVkFramebuffers(r->device, r->swapchainSettings,
+                                       r->imageViews, r->renderPass);
+}
+
+static void cleanupSwapchain(Renderer r) {
+  for (uint32_t i = 0; i < r->swapchainSettings.imageCount; i++) {
+    vkDestroyFramebuffer(r->device, r->framebuffers[i], NULL);
+  }
+  free(r->framebuffers);
+
+  for (uint32_t i = 0; i < r->swapchainSettings.imageCount; i++) {
+    vkDestroyImageView(r->device, r->imageViews[i], NULL);
+  }
+  free(r->imageViews);
+
+  vkDestroySwapchainKHR(r->device, r->swapchain, NULL);
+}
+
 Renderer makeRenderer(char *title, int width, int height) {
   Renderer r = malloc(sizeof(struct Renderer));
   r->title = title;
   r->width = width;
   r->height = height;
+  r->resized = 0;
 
   // init windowing lib
   if (glfwInit() != GLFW_TRUE) {
@@ -115,13 +157,15 @@ Renderer makeRenderer(char *title, int width, int height) {
   // create window
   glfwWindowHint(GLFW_CLIENT_API,
                  GLFW_NO_API); // don't create an OpenGL context
-  glfwWindowHint(GLFW_RESIZABLE,
-                 GLFW_FALSE); // resizing breaks vulkan for now, so disable it
   r->window = glfwCreateWindow(r->width, r->height, r->title, NULL, NULL);
   if (!r->window) {
     glfwTerminate();
     die("Failed to create window\n");
   }
+
+  // resize callback
+  glfwSetWindowUserPointer(r->window, r);
+  glfwSetFramebufferSizeCallback(r->window, framebufferResizeCallback);
 
   // vulkan
   r->instance = makeVkInstance(r->title);
@@ -169,14 +213,21 @@ void mainLoop(Renderer r) {
 
     // wait for previous frame to finish
     vkWaitForFences(r->device, 1, &r->sync.inFlight, VK_TRUE, UINT64_MAX);
-    vkResetFences(r->device, 1, &r->sync.inFlight);
 
     // get next image to render to
     uint32_t imageIndex;
-    vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
-                          r->sync.imageAvailable, VK_NULL_HANDLE, &imageIndex);
+    VkResult result = vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
+                                            r->sync.imageAvailable,
+                                            VK_NULL_HANDLE, &imageIndex);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+      recreateSwapchain(r);
+      continue;
+    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+      die("failed to acquire swap chain image!: %d\n", result);
+    }
 
     // record command buffer
+    vkResetFences(r->device, 1, &r->sync.inFlight);
     recordCommandBuffer(r, imageIndex);
 
     // submit command buffer
@@ -196,8 +247,10 @@ void mainLoop(Renderer r) {
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
-    VkResult result = vkQueueSubmit(r->queue, 1, &submitInfo, r->sync.inFlight);
-    if (result != VK_SUCCESS) {
+    result = vkQueueSubmit(r->queue, 1, &submitInfo, r->sync.inFlight);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+      recreateSwapchain(r);
+    } else if (result != VK_SUCCESS) {
       die("Failed to submit draw command buffer: %d\n", result);
     }
 
@@ -219,6 +272,7 @@ void mainLoop(Renderer r) {
 
 void freeRenderer(Renderer r) {
   vkDeviceWaitIdle(r->device);
+  cleanupSwapchain(r);
 
   // sync objects
   vkDestroySemaphore(r->device, r->sync.imageAvailable, NULL);
@@ -228,23 +282,12 @@ void freeRenderer(Renderer r) {
   // command buffer
   vkDestroyCommandPool(r->device, r->commandPool, NULL);
 
-  // framebuffers
-  for (uint32_t i = 0; i < r->swapchainSettings.imageCount; i++) {
-    vkDestroyFramebuffer(r->device, r->framebuffers[i], NULL);
-  }
-
   // graphics pipeline
   vkDestroyPipeline(r->device, r->pipeline, NULL);
   vkDestroyPipelineLayout(r->device, r->pipelineLayout, NULL);
   vkDestroyRenderPass(r->device, r->renderPass, NULL);
   vkDestroyShaderModule(r->device, r->fragShader, NULL);
   vkDestroyShaderModule(r->device, r->vertShader, NULL);
-
-  // swapchain
-  for (uint32_t i = 0; i < r->swapchainSettings.imageCount; i++) {
-    vkDestroyImageView(r->device, r->imageViews[i], NULL);
-  }
-  vkDestroySwapchainKHR(r->device, r->swapchain, NULL);
 
   // vulkan
   vkDestroyDevice(r->device, NULL);
